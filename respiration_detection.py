@@ -100,7 +100,8 @@ class VernierRespRecorder:
                     # show last value + rough rate
                     dur = self.timestamps[-1] - self.timestamps[0] if len(self.timestamps) > 1 else 0.0
                     rate = len(self.samples) / dur if dur > 0 else 0.0
-                    print(f"Samples: {len(self.samples)} | Last: {self.samples[-1]:.4f} N | ~{rate:.1f} Hz")
+                    phase = self.breath_status[-1][1] if self.breath_status else "N/A"
+                    print(f"Samples: {len(self.samples)} | Last: {self.samples[-1]:.4f} N | ~{rate:.1f} Hz | {phase}")
                     last_print = now
 
                 time.sleep(self.dt)
@@ -189,8 +190,10 @@ class VernierRespRecorder:
 
         data = np.array(self.samples, dtype=np.float32)
         t = np.array(self.timestamps, dtype=np.float64)
+        peaktrough = np.array(self.total_peaktrough, dtype=object)
+        breath_status = np.array(self.breath_status, dtype=object)
 
-        np.savez(filename, data=data, timestamps=t, srate_hz=self.srate_hz)
+        np.savez(filename, data=data, timestamps=t, srate_hz=self.srate_hz, peaktrough=peaktrough, breath_status=breath_status,)
         print(f" Saved: {filename}")
         print(f"Total samples: {len(data)}")
         if len(t) > 1:
