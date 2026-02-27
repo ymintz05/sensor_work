@@ -208,15 +208,41 @@ def main():
     args = p.parse_args()
 
     rec = VernierRespRecorder(srate_hz=args.srate)
-    try:
-        rec.start()
-        t0 = time.time()
-        while time.time() - t0 < args.duration:
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        print("\nCtrl+C received.")
-    finally:
+    rec.start()
+
+    rec.root = tk.Tk()
+    rec.root.title("Respiration Phase")
+    rec.root.geometry("300x200")
+
+    rec.label = tk.Label(rec.root, text="WAITING", font=("Helvetica", 24))
+    rec.label.pack(expand=True, fill="both")
+
+    def tick():
+        phase = rec.breath_status[-1][1] if rec.breath_status else "N/A"
+
+        if phase == "inh":
+            rec.root.configure(bg="dodgerblue")
+            rec.label.configure(text="INHALE", bg="dodgerblue")
+        elif phase == "exh":
+            rec.root.configure(bg="tomato")
+            rec.label.configure(text="EXHALE", bg="tomato")
+        else:
+            rec.root.configure(bg="gray")
+            rec.label.configure(text="WAITING", bg="gray")
+
+        rec.root.after(100, tick)
+
+    def stop_everything():
         rec.stop_and_save(prefix=args.output)
+        rec.root.destroy()
+
+    tick()
+    rec.root.after(int(args.duration * 1000), stop_everything)
+
+    try:
+        rec.root.mainloop()
+    except KeyboardInterrupt:
+        stop_everything()
 
 
 if __name__ == "__main__":
