@@ -9,16 +9,86 @@ import numpy as np
 from datetime import datetime
 import math
 import tkinter as tk
+from dataclasses import dataclass
 
 from godirect import GoDirect
 from pylsl import StreamInfo, StreamOutlet
 
+#============# Changeable Settings #============#
 
+@dataclass
+class Config:
+
+    RR_refrac_sensitivity: float = 0.1 #in sec
+    deriv_tightness: int = 3
+    calib_window: float = 10   #in sec
+    srate_hz: float = 10
+    process: bool = True
+
+    # Preprocessing #
+    min_cutoff: float = 1.0
+    beta: float = 0.0
+    d_cutoff: float = 1.0
+
+
+
+#===============================================#
+ 
+
+#========== Data Preprocessing ==========#
+    
+def smoothing_factor(t_e, cutoff):
+        r = 2 * math.pi * cutoff * t_e
+        return r / (r + 1)
+
+def exponential_smoothing(a, x, x_prev):
+        return a * x + (1 - a) * x_prev
+
+class OneEuroFilter:
+    def __init__(self, t0, x0, dx0=0.0, min_cutoff=1.0, beta=0.0,
+                 d_cutoff=1.0):
+        """Initialize the one euro filter."""
+        # The parameters.
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        # Previous values.
+        self.x_prev = float(x0)
+        self.dx_prev = float(dx0)
+        self.t_prev = float(t0)
+
+    def __call__(self, t, x):
+        """Compute the filtered signal."""
+        t_e = t - self.t_prev
+
+        # The filtered derivative of the signal.
+        a_d = smoothing_factor(t_e, self.d_cutoff)
+        dx = (x - self.x_prev) / t_e
+        dx_hat = exponential_smoothing(a_d, dx, self.dx_prev)
+
+        # The filtered signal.
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a = smoothing_factor(t_e, cutoff)
+        x_hat = exponential_smoothing(a, x, self.x_prev)
+
+        # Memorize the previous values.
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
+        self.t_prev = t
+
+        return x_hat
+
+#========== Respiration Recorder ==========#
+    
 class VernierRespRecorder:
-    def __init__(self, srate_hz=10):
-        self.srate_hz = float(srate_hz)
-        self.dt = 1.0 / self.srate_hz
+    def __init__(self, cfg: Config = Config()):
+        
+        self.cfg = cfg
 
+        self.filter = None
+
+        self.dt = 1.0 / self.cfg.srate_hz
+    
         self.device = None
         self.streaming = False
         self.thread = None
@@ -28,14 +98,17 @@ class VernierRespRecorder:
         # Recorded data
         self.samples = []
         self.timestamps = []  # local time.time() seconds
-
-        #peak-trough analysis
-        
-        self.RR_refrac_sensitivity = 0.1 #in sec
+        # Derived
         self.breath_status = []
-        self.deriv_tightness = 3
         self.total_peaktrough = []
-    
+        self.wavelength = []
+        self.RR = []
+        self.breath_depth = []
+
+        # Processed Data
+        self.samples_processed = []
+        
+
     def start(self):
         print("Connecting to Vernier USB device...")
         gd = GoDirect(use_ble=False, use_usb=True)
@@ -53,7 +126,7 @@ class VernierRespRecorder:
         self.device.enable_sensors([1])
 
         # Create LSL stream (1 channel @ 10 Hz)
-        info = StreamInfo("VernieRespiration", "Respiration", 1, self.srate_hz, "float32", "vernier_resp")
+        info = StreamInfo("VernieRespiration", "Respiration", 1, self.cfg.srate_hz, "float32", "vernier_resp")
         info.desc().append_child_value("manufacturer", "Vernier")
         info.desc().append_child_value("model", "Go Direct Respiration Belt")
         info.desc().append_child_value("units", "Newtons")
@@ -65,7 +138,7 @@ class VernierRespRecorder:
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
-        print(f"Streaming + recording started ({self.srate_hz:.0f} Hz)")
+        print(f"Streaming + recording started ({self.cfg.srate_hz:.0f} Hz)")
 
     def _worker(self):
         count = 0
@@ -82,10 +155,28 @@ class VernierRespRecorder:
                         val = float(s.value)
                         ts = time.time()
 
-                        # Record
+                        # Initialize filter class #
+                        if self.filter is None:
+                            self.filter = OneEuroFilter(
+                                ts,
+                                val,
+                                min_cutoff=self.cfg.min_cutoff,
+                                beta=self.cfg.beta,
+                                d_cutoff=self.cfg.d_cutoff
+                            )
+                    
+                        # Record 
                         self.samples.append(val)
                         self.timestamps.append(ts)
 
+                        # Preprocess 
+                        if (len(self.timestamps)) >= 2:
+                            self.samples_processed.append(self.filter(ts,val))
+                        elif (len(self.timestamps) < 2):
+                            self.samples_processed.append(val)
+                        
+
+                        #Analysis
                         self.analysis()
 
                         # Push to LSL
@@ -111,34 +202,90 @@ class VernierRespRecorder:
                 break
 
     def analysis(self):
+        
+        is_exh_candidate = is_inh_candidate = is_first_inst = is_refrac_period = False
+        
+        # if first instance
+        if len(self.total_peaktrough)==0: 
+            is_first_inst = True
 
-        if (len(self.timestamps) >= self.deriv_tightness):
+        # Use raw data for first instance
+        if self.cfg.process: 
+            samples = self.samples_processed
+        else:
+            samples = self.samples
 
-            mp = math.floor(self.deriv_tightness/2)
+        # validate sample n to derive vals
+        if (len(self.timestamps) >= self.cfg.deriv_tightness):
 
-            last_values = self.samples[-self.deriv_tightness:]
-            last_timestamps = self.timestamps[-self.deriv_tightness:]
+            #==== derivation approx ====#
+            
+            mp = math.floor(self.cfg.deriv_tightness/2)
+
+            last_values = samples[-self.cfg.deriv_tightness:]
+            last_timestamps = self.timestamps[-self.cfg.deriv_tightness:]
             initial_diff = last_values[mp] - last_values[0]
-            final_diff = last_values[self.deriv_tightness - 1] - last_values[mp]
+            final_diff = last_values[self.cfg.deriv_tightness - 1] - last_values[mp]
 
-            derivative_approx_init =  initial_diff/self.dt 
-            derivative_approx_final =  final_diff/self.dt
-                
-            if (len(self.total_peaktrough)==0) or (last_timestamps[mp] - self.total_peaktrough[-1][0] > self.RR_refrac_sensitivity):
-                if (derivative_approx_init > 0 and derivative_approx_final < 0):
+            derivative_approx_init =  initial_diff/(self.dt * mp)
+            derivative_approx_final =  final_diff/(self.dt * mp)
+
+            
+            # prevents counting during refraction period
+            if (len(self.total_peaktrough) > 0) and (last_timestamps[mp] - self.total_peaktrough[-1][0] < self.cfg.RR_refrac_sensitivity): 
+                is_refrac_period = True  
+            
+            # inhalation, exhalation criteria
+            if derivative_approx_init > 0 and derivative_approx_final < 0:
+                is_exh_candidate = True
+            if derivative_approx_init < 0 and derivative_approx_final > 0:
+                is_inh_candidate = True
+    
+
+            # breath capture logic
+            if (
+                is_first_inst or 
+                not is_refrac_period
+                ):
+
+                if (is_exh_candidate):
                     self.total_peaktrough.append((last_timestamps[mp], last_values[mp], "exh start"))
-                if (derivative_approx_init < 0 and derivative_approx_final > 0):
+
+                if (is_inh_candidate):
                     self.total_peaktrough.append((last_timestamps[mp], last_values[mp], "inh start")) 
 
-        if(len(self.total_peaktrough)>0):
+                    # wavelength capture
+                    if ((len(self.total_peaktrough) >= 3)) and (self.total_peaktrough[-3][2] == "inh start") and (self.total_peaktrough[-2][2] == "exh start"):
+                        self.wavelength.append(((last_timestamps[mp], last_values[mp]),(self.total_peaktrough[-3][0], self.total_peaktrough[-3][1])))
+
+        # breath status stream
+        if(len(self.total_peaktrough) > 0):
             if (self.total_peaktrough[-1][2] == "exh start"):
-                self.breath_status.append(((self.timestamps[-1]), "exh"))
+                self.breath_status.append(((self.timestamps[-1]), "exh")) 
 
             if (self.total_peaktrough[-1][2] == "inh start"):
                 self.breath_status.append(((self.timestamps[-1]), "inh"))
         else:
             self.breath_status.append(((self.timestamps[-1]), "N/A"))
 
+
+    # def derived_values(self):
+    #     # RR
+    #     if len(self.total_peaktrough) < 2:
+    #         return
+    #     if len(self.timestamps) < 1:
+    #         return
+
+    #     duration = self.timestamps[-1] - self.timestamps[0]
+    #     RR = len(self.wavelength) / duration
+    #     self.RR.append((self.timestamps[-1], RR))
+
+    #     # Breath Depth 
+    #     if (self.total_peaktrough[-1][2] == "exh start"):
+    #         self.breath_depth.append((self.total_peaktrough[-1][0], abs(self.total_peaktrough[-1][1] - self.total_peaktrough[-2][1])))
+
+
+    # placeholder, to be replaced with VNS setup
     def start_phase_window(self, poll_ms=100):
 
         self.root = tk.Tk()
@@ -188,17 +335,18 @@ class VernierRespRecorder:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{ts}.npz"
 
-        data = np.array(self.samples, dtype=np.float32)
-        t = np.array(self.timestamps, dtype=np.float64)
+        samples = np.array(self.samples, dtype=np.float32)
+        samples_processed = np.array(self.samples_processed, dtype=np.float32)
+        time = np.array(self.timestamps, dtype=np.float64)
         peaktrough = np.array(self.total_peaktrough, dtype=object)
         breath_status = np.array(self.breath_status, dtype=object)
 
-        np.savez(filename, data=data, timestamps=t, srate_hz=self.srate_hz, peaktrough=peaktrough, breath_status=breath_status,)
+        np.savez(filename, data=samples, timestamps=time, srate_hz=self.cfg.srate_hz, peaktrough=peaktrough, breath_status=breath_status,)
         print(f" Saved: {filename}")
-        print(f"Total samples: {len(data)}")
+        print(f"Total samples: {len(samples)}")
         if len(t) > 1:
             dur = t[-1] - t[0]
-            print(f"Duration: {dur:.1f} s | Avg rate: {len(data)/dur:.2f} Hz")
+            print(f"Duration: {dur:.1f} s | Avg rate: {len(samples)/dur:.2f} Hz")
         return filename
 
 
@@ -206,11 +354,10 @@ def main():
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--duration", "-d", type=float, default=60.0, help="recording duration in seconds")
-    p.add_argument("--srate", "-r", type=float, default=10.0, help="target sample rate (Hz)")
     p.add_argument("--output", "-o", type=str, default="vernier_resp", help="output file prefix")
     args = p.parse_args()
 
-    rec = VernierRespRecorder(srate_hz=args.srate)
+    rec = VernierRespRecorder()
     rec.start()
 
     rec.root = tk.Tk()
