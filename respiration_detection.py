@@ -20,7 +20,7 @@ from pylsl import StreamInfo, StreamOutlet
 class Config:
 
     RR_refrac_sensitivity: float = 0.1 #in sec
-    deriv_tightness: int = 3
+    deriv_tightness: int = 3 #MIN 3
     calib_window: float = 10   #in sec
     srate_hz: float = 10
     process: bool = True
@@ -341,11 +341,19 @@ class VernierRespRecorder:
         peaktrough = np.array(self.total_peaktrough, dtype=object)
         breath_status = np.array(self.breath_status, dtype=object)
 
-        np.savez(filename, data=samples, timestamps=time, srate_hz=self.cfg.srate_hz, peaktrough=peaktrough, breath_status=breath_status,)
+        np.savez(
+            filename, 
+            data=samples, 
+            data2=samples_processed,
+            timestamps=time, 
+            srate_hz=self.cfg.srate_hz, 
+            peaktrough=peaktrough, 
+            breath_status=breath_status,
+            )
         print(f" Saved: {filename}")
         print(f"Total samples: {len(samples)}")
-        if len(t) > 1:
-            dur = t[-1] - t[0]
+        if len(self.timestamps) > 1:
+            dur = self.timestamps[-1] - self.timestamps[0]
             print(f"Duration: {dur:.1f} s | Avg rate: {len(samples)/dur:.2f} Hz")
         return filename
 
