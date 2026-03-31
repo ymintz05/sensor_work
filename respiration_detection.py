@@ -222,9 +222,8 @@ class VernierRespRecorder:
             return
 
         
-
-    def calibration(self):
-        e
+    #def calibration(self):
+        
 
     def analysis(self):
         
@@ -238,18 +237,10 @@ class VernierRespRecorder:
         
         # validate sample n to derive vals
         if (len(self.timestamps) >= self.cfg.deriv_tightness):
-
-            #==== derivation approx ====#
             
             mp = math.floor(self.cfg.deriv_tightness/2)
-
             last_values = samples[-self.cfg.deriv_tightness:]
             last_timestamps = self.timestamps[-self.cfg.deriv_tightness:]
-            initial_diff = last_values[mp] - last_values[0]
-            final_diff = last_values[self.cfg.deriv_tightness - 1] - last_values[mp]
-
-            derivative_approx_init =  initial_diff/(self.dt * mp)
-            derivative_approx_final =  final_diff/(self.dt * mp)
 
             derivative_approx_init, derivative_approx_final = self.derivative()
 
