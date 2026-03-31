@@ -22,6 +22,7 @@ def Button1_Click():
     ChangeDemand(10000)
 def Button2_Click():
     ChangeDemand(25000)
+    
 def main():
  
     global DS8R

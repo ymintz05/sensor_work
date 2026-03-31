@@ -201,6 +201,31 @@ class VernierRespRecorder:
                 print(f"Vernier worker error: {e}")
                 break
 
+    def derivative(self):
+
+        samples = self.samples
+
+        if (len(self.timestamps) >= self.cfg.deriv_tightness):
+            
+            mp = math.floor(self.cfg.deriv_tightness/2)
+
+            last_values = samples[-self.cfg.deriv_tightness:]
+            last_timestamps = self.timestamps[-self.cfg.deriv_tightness:]
+            initial_diff = last_values[mp] - last_values[0]
+            final_diff = last_values[self.cfg.deriv_tightness - 1] - last_values[mp]
+
+            derivative_approx_init =  initial_diff/(self.dt * mp)
+            derivative_approx_final =  final_diff/(self.dt * mp)
+
+            return (derivative_approx_init, derivative_approx_final)
+        else:
+            return
+
+        
+
+    def calibration(self):
+        e
+
     def analysis(self):
         
         is_exh_candidate = is_inh_candidate = is_first_inst = is_refrac_period = False
@@ -209,12 +234,8 @@ class VernierRespRecorder:
         if len(self.total_peaktrough)==0: 
             is_first_inst = True
 
-        # Use raw data for first instance
-        if self.cfg.process: 
-            samples = self.samples_processed
-        else:
-            samples = self.samples
-
+        samples = self.samples
+        
         # validate sample n to derive vals
         if (len(self.timestamps) >= self.cfg.deriv_tightness):
 
@@ -230,9 +251,14 @@ class VernierRespRecorder:
             derivative_approx_init =  initial_diff/(self.dt * mp)
             derivative_approx_final =  final_diff/(self.dt * mp)
 
+            derivative_approx_init, derivative_approx_final = self.derivative()
+
             
             # prevents counting during refraction period
-            if (len(self.total_peaktrough) > 0) and (last_timestamps[mp] - self.total_peaktrough[-1][0] < self.cfg.RR_refrac_sensitivity): 
+            if (
+                (len(self.total_peaktrough) > 0) and 
+                (last_timestamps[mp] - self.total_peaktrough[-1][0] < self.cfg.RR_refrac_sensitivity)
+                ): 
                 is_refrac_period = True  
             
             # inhalation, exhalation criteria
@@ -255,7 +281,11 @@ class VernierRespRecorder:
                     self.total_peaktrough.append((last_timestamps[mp], last_values[mp], "inh start")) 
 
                     # wavelength capture
-                    if ((len(self.total_peaktrough) >= 3)) and (self.total_peaktrough[-3][2] == "inh start") and (self.total_peaktrough[-2][2] == "exh start"):
+                    if (
+                        ((len(self.total_peaktrough) >= 3)) and  (self.total_peaktrough[-3][2] == "inh start") and 
+                        (self.total_peaktrough[-2][2] == "exh start")
+                        ):
+
                         self.wavelength.append(((last_timestamps[mp], last_values[mp]),(self.total_peaktrough[-3][0], self.total_peaktrough[-3][1])))
 
         # breath status stream
