@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from godirect import GoDirect
 from pylsl import StreamInfo, StreamOutlet
+from gpt_trace import LiveTraceUI
 
 #============# Changeable Settings #============#
 
@@ -396,6 +397,9 @@ def main():
     rec.label = tk.Label(rec.root, text="WAITING", font=("Helvetica", 24))
     rec.label.pack(expand=True, fill="both")
 
+    trace_ui = LiveTraceUI(rec, plot_window_s=15.0, update_ms=100)
+    trace_ui.start()
+
     def tick():
         phase = rec.breath_status[-1][1] if rec.breath_status else "N/A"
 
@@ -412,6 +416,7 @@ def main():
         rec.root.after(100, tick)
 
     def stop_everything():
+        trace_ui.close()
         rec.stop_and_save(prefix=args.output)
         rec.root.destroy()
 
@@ -426,3 +431,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
