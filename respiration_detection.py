@@ -10,6 +10,7 @@ from datetime import datetime
 import math
 import tkinter as tk
 from dataclasses import dataclass
+from scipy.signal import butter, sosfilt, sosfilt_zi
 
 from godirect import GoDirect
 from pylsl import StreamInfo, StreamOutlet
@@ -20,24 +21,28 @@ from gpt_trace import LiveTraceUI
 @dataclass
 class Config:
 
-    RR_refrac_sensitivity: float = 0.1 #in sec
-    deriv_tightness: int = 3 #MIN 3
+    # Native settings #
+    RR_refrac_sensitivity: float = 0.5 #in sec
+    deriv_tightness: int = 6 #MIN 3
     calib_window: float = 10   #in sec
-    srate_hz: float = 10
+    srate_hz: float = 10 
     process: bool = True
+    filter_type: str = "b" 
 
-    # Preprocessing #
+    # Preprocessing Low Pass #
     min_cutoff: float = 1.0
     beta: float = 0.0
     d_cutoff: float = 1.0
 
-
-
-#===============================================#
+    # Preprocessing Band Pass #
+    low: float = 0.05                 # low cutoff, Hz
+    high: float = 0.7                 # low cutoff, Hz
+    order: int = 2
  
 
-#========== Data Preprocessing ==========#
-    
+#========== Signal Processing ==========#
+
+#========== Lowpass ==========# 
 def smoothing_factor(t_e, cutoff):
         r = 2 * math.pi * cutoff * t_e
         return r / (r + 1)
@@ -45,7 +50,7 @@ def smoothing_factor(t_e, cutoff):
 def exponential_smoothing(a, x, x_prev):
         return a * x + (1 - a) * x_prev
 
-class OneEuroFilter:
+class lowpass:
     def __init__(self, t0, x0, dx0=0.0, min_cutoff=1.0, beta=0.0,
                  d_cutoff=1.0):
         """Initialize the one euro filter."""
@@ -78,6 +83,45 @@ class OneEuroFilter:
         self.t_prev = t
 
         return x_hat
+    
+#========== Bandpass ==========# 
+
+class bandpass:
+    def __call__(self, x_new):
+        x = np.array([x_new], dtype=float)
+        y, self.state = sosfilt(self.sos, x, zi=self.state)
+        return y[0]
+
+    def filter_chunk(self, x_chunk):
+        x = np.asarray(x_chunk, dtype=float)
+        y, self.state = sosfilt(self.sos, x, zi=self.state)
+        return y
+
+    def reset(self):
+        self.state = self.zi * 0.0
+    
+    def __init__(self, fs, low=0.05, high=0.7, order=2):
+        
+        self.fs = fs
+        self.low = low
+        self.high = high
+        self.order = order
+
+        
+        self.sos = butter(
+            N=self.order,
+            Wn=[self.low, self.high],
+            btype="bandpass",
+            fs=self.fs,
+            output="sos"
+        )
+
+        # Initialize state 
+        self.zi = sosfilt_zi(self.sos)
+        self.state = self.zi * 0.0
+
+
+
 
 #========== Respiration Recorder ==========#
     
@@ -158,23 +202,34 @@ class VernierRespRecorder:
 
                         # Initialize filter class #
                         if self.filter is None:
-                            self.filter = OneEuroFilter(
-                                ts,
-                                val,
-                                min_cutoff=self.cfg.min_cutoff,
-                                beta=self.cfg.beta,
-                                d_cutoff=self.cfg.d_cutoff
-                            )
+                            if self.cfg.filter_type == "l":
+                                self.filter = lowpass(
+                                    ts,
+                                    val,
+                                    min_cutoff=self.cfg.min_cutoff,
+                                    beta=self.cfg.beta,
+                                    d_cutoff=self.cfg.d_cutoff
+                                )
+                            if self.cfg.filter_type == "b":
+                                self.filter = bandpass(
+                                    fs=self.cfg.srate_hz,
+                                    low=self.cfg.low,
+                                    high=self.cfg.high,
+                                    order=self.cfg.order
+                                )
                     
                         # Record 
                         self.samples.append(val)
                         self.timestamps.append(ts)
 
                         # Preprocess 
-                        if (len(self.timestamps)) >= 2:
-                            self.samples_processed.append(self.filter(ts,val))
-                        elif (len(self.timestamps) < 2):
-                            self.samples_processed.append(val)
+                        if self.cfg.filter_type == "l":
+                            if (len(self.timestamps)) >= 2:
+                                self.samples_processed.append(self.filter(ts,val))
+                            elif (len(self.timestamps) < 2):
+                                self.samples_processed.append(val)
+                        if self.cfg.filter_type == "b":
+                            self.samples_processed.append(self.filter(val))
                         
 
                         #Analysis
@@ -204,7 +259,7 @@ class VernierRespRecorder:
 
     def derivative(self):
 
-        samples = self.samples
+        samples = self.samples_processed
 
         if (len(self.timestamps) >= self.cfg.deriv_tightness):
             
@@ -234,7 +289,7 @@ class VernierRespRecorder:
         if len(self.total_peaktrough)==0: 
             is_first_inst = True
 
-        samples = self.samples
+        samples = self.samples_processed
         
         # validate sample n to derive vals
         if (len(self.timestamps) >= self.cfg.deriv_tightness):
