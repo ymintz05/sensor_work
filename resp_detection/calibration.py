@@ -20,35 +20,58 @@ def _compute_cross_intervals(start_times, end_times):
     return np.array(intervals)
 
 
-def _departure_slopes(sig, event_idx, mp, dt):
+def _departure_slopes(sig, event_idx, mp, dt, find="min"):
     """
-    Compute the departure slope d_f at each confirmed event, using the same
-    finite-difference arithmetic as the live detector.
+    Compute the departure slope at each confirmed event using the same
+    arithmetic as the live detector.
 
-    For a confirmed event at sample index k, the live detector would have seen:
-        window = sig[k-mp : k+mp+1]  (size 2*mp+1 = deriv_tightness)
-        candidate at position mp (i.e. sig[k])
-        d_f = (window[-1] - window[mp]) / (dt * mp)
-             = (sig[k+mp]  - sig[k])    / (dt * mp)
+    For each event at index k, extract the window sig[k-mp : k+mp+1],
+    find the true extremum within it (argmin for troughs, argmax for peaks),
+    then compute:
 
-    Only events with enough look-ahead (k+mp < len(sig)) are included.
+        inh slope = (window[-1] - extremum_val) / (end_t - extremum_t)
+        exh slope = (extremum_val - window[-1]) / (end_t - extremum_t)
+
+    Both are stored as positive values so they form the same-sign
+    distribution that the live detector produces.
 
     Parameters
     ----------
-    sig        : 1-D array, the processed signal
-    event_idx  : array of confirmed event indices (troughs or peaks)
-    mp         : deriv_tightness // 2
-    dt         : 1 / srate_hz
-
-    Returns
-    -------
-    slopes : 1-D array of d_f values (empty if none fit)
+    sig       : 1-D array, the processed signal
+    event_idx : array of confirmed event indices (troughs or peaks)
+    mp        : deriv_tightness // 2
+    dt        : 1 / srate_hz
+    find      : "min" for inhalation troughs, "max" for exhalation peaks
     """
     slopes = []
     for k in event_idx:
-        if k + mp < len(sig):
-            d_f = (sig[k + mp] - sig[k]) / (dt * mp)
-            slopes.append(d_f)
+        start = k - mp
+        end   = k + mp
+        if start < 0 or end >= len(sig):
+            continue
+
+        window  = sig[start : end + 1]
+        win_ts  = np.arange(len(window), dtype=float) * dt
+
+        if find == "min":
+            ext_idx = int(np.argmin(window))
+        else:
+            ext_idx = int(np.argmax(window))
+
+        ext_val  = window[ext_idx]
+        ext_t    = win_ts[ext_idx]
+        end_val  = window[-1]
+        end_t    = win_ts[-1]
+        delta_t  = end_t - ext_t
+
+        if delta_t < 1e-6:
+            continue
+
+        if find == "min":
+            slopes.append((end_val - ext_val) / delta_t)   # positive = rising
+        else:
+            slopes.append((ext_val - end_val) / delta_t)   # positive = falling
+
     return np.array(slopes)
 
 
@@ -88,23 +111,22 @@ def _compute_calibration(raw_stream):
     Run NK2 on raw_stream and extract all statistical priors needed by the
     live detector.
 
-    Calibration tuple layout (18 values + last_inh + last_exh):
+    Calibration tuple layout:
         0  exp_inh          median inh-to-inh interval (s)
         1  spr_inh          spread of inh-to-inh intervals
         2  exp_exh          median exh-to-exh interval (s)
         3  spr_exh          spread of exh-to-exh intervals
-        4  exp_i2e          median inh-onset → exh-onset interval
+        4  exp_i2e          median inh-onset -> exh-onset interval
         5  spr_i2e
-        6  exp_e2i          median exh-onset → inh-onset interval
+        6  exp_e2i          median exh-onset -> inh-onset interval
         7  spr_e2i
-        8  exp_slope_inh    median d_f at confirmed troughs (should be > 0)
-        9  spr_slope_inh    spread of departure slopes at troughs
-       10  exp_slope_exh    median |d_f| at confirmed peaks  (d_f < 0 there,
-                            stored as negative; score with -d_f in detector)
-       11  spr_slope_exh    spread of departure slopes at peaks
-       12  exp_prom_inh     median inh prominence (preceding_peak − trough)
+        8  exp_slope_inh    median departure slope at troughs (positive, rising)
+        9  spr_slope_inh    spread of inh departure slopes
+       10  exp_slope_exh    median departure slope at peaks   (positive, falling)
+       11  spr_slope_exh    spread of exh departure slopes
+       12  exp_prom_inh     median inh prominence (preceding_peak - trough)
        13  spr_prom_inh     spread of inh prominences
-       14  exp_prom_exh     median exh prominence (peak − preceding_trough)
+       14  exp_prom_exh     median exh prominence (peak - preceding_trough)
        15  spr_prom_exh     spread of exh prominences
        16  last_inh         (ts, val) of last confirmed trough in window
        17  last_exh         (ts, val) of last confirmed peak  in window
@@ -117,8 +139,8 @@ def _compute_calibration(raw_stream):
         return None
 
     # ── Event indices ─────────────────────────────────────────────────────────
-    trough_idx = np.flatnonzero(stream_signals["RSP_Troughs"])   # inhalation onsets
-    peak_idx   = np.flatnonzero(stream_signals["RSP_Peaks"])     # exhalation onsets
+    trough_idx = np.flatnonzero(stream_signals["RSP_Troughs"])
+    peak_idx   = np.flatnonzero(stream_signals["RSP_Peaks"])
 
     if len(trough_idx) < 2 or len(peak_idx) < 2:
         return None
@@ -127,14 +149,14 @@ def _compute_calibration(raw_stream):
     times_exh = peak_idx   / Config.srate_hz
 
     # ── Inhalation interval stats ─────────────────────────────────────────────
-    ivs_inh      = np.diff(times_inh)
-    exp_inh      = np.median(ivs_inh)
-    spr_inh      = _spread(ivs_inh)
+    ivs_inh = np.diff(times_inh)
+    exp_inh = np.median(ivs_inh)
+    spr_inh = _spread(ivs_inh)
 
     # ── Exhalation interval stats ─────────────────────────────────────────────
-    ivs_exh      = np.diff(times_exh)
-    exp_exh      = np.median(ivs_exh)
-    spr_exh      = _spread(ivs_exh)
+    ivs_exh = np.diff(times_exh)
+    exp_exh = np.median(ivs_exh)
+    spr_exh = _spread(ivs_exh)
 
     # ── Cross-phase timing ────────────────────────────────────────────────────
     iv_i2e = _compute_cross_intervals(times_inh, times_exh)
@@ -146,20 +168,17 @@ def _compute_calibration(raw_stream):
     exp_e2i = np.median(iv_e2i);  spr_e2i = _spread(iv_e2i)
 
     # ── Departure slope stats ─────────────────────────────────────────────────
-    # mp mirrors the live detector: candidate sits at deriv_tightness // 2
+    # Mirrors analysis(): argmin in window for inh, argmax for exh
+    # slope = (last_val - extremum) / elapsed  — always positive
     mp = Config.deriv_tightness // 2
     dt = 1.0 / Config.srate_hz
 
-    slopes_inh = _departure_slopes(sig, trough_idx, mp, dt)
-    slopes_exh = _departure_slopes(sig, peak_idx,   mp, dt)
+    slopes_inh = _departure_slopes(sig, trough_idx, mp, dt, find="min")
+    slopes_exh = _departure_slopes(sig, peak_idx,   mp, dt, find="max")
 
-    # Need at least 2 valid slope measurements to compute spread
     if len(slopes_inh) < 2 or len(slopes_exh) < 2:
         return None
 
-    # At a trough d_f should be positive (signal rising); store raw value.
-    # At a peak   d_f should be negative (signal falling); store raw value
-    # (detector will use -d_f so it can apply the same one-sided zero floor).
     exp_slope_inh = np.median(slopes_inh);  spr_slope_inh = _spread(slopes_inh)
     exp_slope_exh = np.median(slopes_exh);  spr_slope_exh = _spread(slopes_exh)
 
@@ -190,7 +209,6 @@ def _compute_calibration(raw_stream):
     )
 
 
-
 def initial_calibration(raw_stream):
     """Full calibration including seed events. Returns 18-element tuple or None."""
     return _compute_calibration(raw_stream)
@@ -200,9 +218,9 @@ def rolling_calibration(raw_stream):
     """
     Rolling recalibration — same stats as initial but drops seed events
     so the caller keeps its existing inh_onset / exh_onset lists.
-    Returns a 16-element tuple (indices 0–15) or None.
+    Returns a 16-element tuple (indices 0-15) or None.
     """
     calib = _compute_calibration(raw_stream)
     if calib is None:
         return None
-    return calib[:16]   # drop last_inh (16) and last_exh (17)
+    return calib[:16]
