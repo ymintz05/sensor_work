@@ -5,7 +5,7 @@ from psychopy.hardware import keyboard
 from ds8r_state_set import get_state, set_demand
 
 # modifiable in arduino only 
-stim_duration = 30.0
+STIM_DURATION = 30.0
 
 win = visual.Window(
     size=(800, 600),
@@ -62,6 +62,7 @@ def wait_any_key():
 
 def rate_stim():
     kb.clearEvents()
+    rating_value.text = ""
 
     while True:
         rating_prompt.draw()
@@ -115,10 +116,10 @@ def mol_increasing(init_current=5.0, current_interval=0.2, current_cap=8.0):
         core.wait(1)
 
         # check current match with ds8r & arduino-triggered fire protocol
-        if not math.isclose(get_state(), current_prepared, abs_tol = 0.05):
+        if not math.isclose(float(get_state("demand")), current_prepared, abs_tol = 0.05):
             raise RuntimeError("requested current does not match stim current")
-        fire(current_prepared)
-        core.wait(stim_duration)
+        #fire(current_prepared)
+        core.wait(STIM_DURATION)
 
         current_administered = current_prepared
 
@@ -155,10 +156,10 @@ def mol_decreasing(init_current=8.0, current_interval=0.2):
         core.wait(1)
 
         # check current match with ds8r & arduino-triggered fire protocol
-        if not math.isclose(get_state(), current_prepared, abs_tol = 0.05):
+        if not math.isclose(float(get_state("demand")), current_prepared, abs_tol = 0.05):
             raise RuntimeError("requested current does not match stim current")
-        fire(current_prepared)
-        core.wait(stim_duration)
+        #fire(current_prepared)
+        core.wait(STIM_DURATION)
 
         current_administered = current_prepared
 
@@ -190,6 +191,7 @@ def main(
         mol_dec_sham_curr_ivl = 0.2, 
         ):
     
+
     wait_any_key()
 
     # vns protocol
@@ -246,5 +248,7 @@ if __name__ == "__main__":
 # start at the safe cap, decrease, stop at value 5 to take, avg current for final threshold 
 # 30s firing 
 # stimulus page should say "pay attn to stim, also remove prev rating"
+
+#decreasing: highest cap, NOT THEIRs 
     
     

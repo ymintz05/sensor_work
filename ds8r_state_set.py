@@ -3,6 +3,7 @@ import sys
 import ctypes.util
 
 D128API = ctypes.WinDLL(r"C:\Windows\System32\D128API.dll")
+CURRENT_CAP = 8.0
 
 class CONTROLFLAGS(ctypes.Structure):
     _fields_ = [
@@ -53,25 +54,31 @@ D128API.DGD128_Initialise(ctypes.byref(api_ref), ctypes.byref(api_error), None, 
 print(f"Initialised. Ref: {api_ref.value}")
 
 # --- Read current state ---
-def get_state():
+def get_state(spec = None):
+    
     cb = ctypes.c_int(ctypes.sizeof(D128))
     buf = D128()
     D128API.DGD128_Update(api_ref, ctypes.byref(api_error), None, 0,
                           ctypes.byref(buf), ctypes.byref(cb), None, None)
     dev = buf.State[0]
     s = dev.State
-    print(f"Serial:    {dev.DeviceID}")
-    print(f"Demand:    {s.Demand / 10:.1f} mA")
-    print(f"Width:     {s.Width} µs")
-    print(f"Recovery:  {s.Recovery} %")
-    print(f"Dwell:     {s.Dwell} µs")
-    print(f"Enable:    {s.Control.Enable}")
-    print(f"Mode:      {s.Control.Mode}")
-    return buf
+
+    if spec == "demand":
+        return float(s.Demand / 10)
+    elif spec is None:
+        #print(f"Serial:    {dev.DeviceID}")
+        #print(f"Demand:    {s.Demand / 10:.1f} mA")
+        #print(f"Width:     {s.Width} µs")
+        #print(f"Recovery:  {s.Recovery} %")
+        #print(f"Dwell:     {s.Dwell} µs")
+        #print(f"Enable:    {s.Control.Enable}")
+        #print(f"Mode:      {s.Control.Mode}")
+        return buf
+
 
 def set_demand(mA):
-    if mA > 8.0:
-        sys.exit("cannot exceed 8.0 mA")
+    if mA > CURRENT_CAP:
+        sys.exit(f"cannot exceed {CURRENT_CAP} mA")
     buf = get_state()
     buf.State[0].State.Demand = int(mA * 10)
     cb_new = ctypes.c_int(ctypes.sizeof(D128))
@@ -80,7 +87,7 @@ def set_demand(mA):
                                 ctypes.byref(buf), cb_new,
                                 None, ctypes.byref(cb_cur),
                                 None, None)
-    print(f"Demand set to {mA} mA, ret={ret}, err={api_error.value}")
+    #print(f"Demand set to {mA} mA, ret={ret}, err={api_error.value}")
 
 def set_pulse_width(us):
     buf = get_state()
@@ -91,7 +98,7 @@ def set_pulse_width(us):
                                 ctypes.byref(buf), cb_new,
                                 None, ctypes.byref(cb_cur),
                                 None, None)
-    print(f"Width set to {us} µs, ret={ret}, err={api_error.value}")
+    #print(f"Width set to {us} µs, ret={ret}, err={api_error.value}")
 
 def trigger():
     buf = get_state()
@@ -102,6 +109,6 @@ def trigger():
                                 ctypes.byref(buf), cb_new,
                                 None, ctypes.byref(cb_cur),
                                 None, None)
-    print(f"Triggered, ret={ret}, err={api_error.value}")
+    #print(f"Triggered, ret={ret}, err={api_error.value}")
 
  
