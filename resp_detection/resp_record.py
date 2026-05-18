@@ -8,10 +8,138 @@ from godirect import GoDirect
 from pylsl import StreamInfo, StreamOutlet
 import threading
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Adaptive weighting
+# ═══════════════════════════════════════════════════════════════════════════  
+
+def adapt_weights_from_initial_calibration(
+    cfg,
+    calibration_vals,
+    base_weights=None,
+    blend=0.35,
+):
+    """
+    Gently readjust hardcoded baseline weights after initial calibration.
+
+    Uses feature reliability:
+      - slope: log-space spread only
+      - timing/prominence: relative spread = spread / expected
+
+    Requires calibration_vals to be the 16-value tuple:
+      expected/spread for inh, exh, i2e, e2i, slope inh/exh, prom inh/exh
+    """
+
+    (
+        expected_inh,        spread_inh,
+        expected_exh,        spread_exh,
+        expected_inh_to_exh, spread_inh_to_exh,
+        expected_exh_to_inh, spread_exh_to_inh,
+        expected_slope_inh,  spread_slope_inh,
+        expected_slope_exh,  spread_slope_exh,
+        expected_prom_inh,   spread_prom_inh,
+        expected_prom_exh,   spread_prom_exh,
+    ) = calibration_vals
+
+    def base(name):
+        if base_weights is not None:
+            return float(base_weights[name])
+        return float(getattr(cfg, name))
+
+    def relative_reliability(expected, spread, min_mult=0.6, max_mult=1.4):
+        eps = 1e-6
+        relative_spread = abs(spread) / (abs(expected) + eps)
+
+        # relative_spread ~= 0.25 gives multiplier ~= 1
+        mult = 0.25 / (relative_spread + eps)
+
+        return float(np.clip(mult, min_mult, max_mult))
+
+    def log_reliability(spread, min_mult=0.6, max_mult=1.4):
+        eps = 1e-6
+
+        # In log-space, smaller spread means more reliable.
+        # spread ~= 0.25 gives multiplier ~= 1
+        mult = 0.25 / (abs(spread) + eps)
+
+        return float(np.clip(mult, min_mult, max_mult))
+
+    def blend_weight(base_weight, multiplier):
+        return float(base_weight * ((1.0 - blend) + blend * multiplier))
+
+    # Slope calibration is log-space, so use log-space spread directly.
+    slope_mult_inh = log_reliability(spread_slope_inh)
+    slope_mult_exh = log_reliability(spread_slope_exh)
+
+    # Timing is raw seconds, so relative spread is appropriate.
+    timing_mult_inh = 0.5 * relative_reliability(
+        expected_inh,
+        spread_inh,
+    ) + 0.5 * relative_reliability(
+        expected_exh_to_inh,
+        spread_exh_to_inh,
+    )
+
+    timing_mult_exh = 0.5 * relative_reliability(
+        expected_exh,
+        spread_exh,
+    ) + 0.5 * relative_reliability(
+        expected_inh_to_exh,
+        spread_inh_to_exh,
+    )
+
+    # Prominence is raw amplitude, so relative spread is appropriate.
+    prom_mult_inh = relative_reliability(expected_prom_inh, spread_prom_inh)
+    prom_mult_exh = relative_reliability(expected_prom_exh, spread_prom_exh)
+
+    # Apply gentle readjustment from hardcoded baseline weights.
+    cfg.w1i = blend_weight(base("w1i"), slope_mult_inh)
+    cfg.w2i = blend_weight(base("w2i"), timing_mult_inh)
+    cfg.w3i = blend_weight(base("w3i"), prom_mult_inh)
+
+    cfg.w1e = blend_weight(base("w1e"), slope_mult_exh)
+    cfg.w2e = blend_weight(base("w2e"), timing_mult_exh)
+    cfg.w3e = blend_weight(base("w3e"), prom_mult_exh)
+
+    print("Initial calibration readjusted weights:")
+    print(
+        f"  INH: slope={cfg.w1i:.3f}, "
+        f"timing={cfg.w2i:.3f}, "
+        f"prominence={cfg.w3i:.3f}"
+    )
+    print(
+        f"  EXH: slope={cfg.w1e:.3f}, "
+        f"timing={cfg.w2e:.3f}, "
+        f"prominence={cfg.w3e:.3f}"
+    )
+
+    print("Reliability multipliers:")
+    print(
+        f"  INH: slope={slope_mult_inh:.3f}, "
+        f"timing={timing_mult_inh:.3f}, "
+        f"prominence={prom_mult_inh:.3f}"
+    )
+    print(
+        f"  EXH: slope={slope_mult_exh:.3f}, "
+        f"timing={timing_mult_exh:.3f}, "
+        f"prominence={prom_mult_exh:.3f}"
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Recording Class
+# ═══════════════════════════════════════════════════════════════════════════  
 
 class VernierRespRecorder:
 
     def __init__(self, cfg: Config = Config()):
+
+        self.base_weights = {
+        "w1i": cfg.w1i,
+        "w2i": cfg.w2i,
+        "w3i": cfg.w3i,
+        "w1e": cfg.w1e,
+        "w2e": cfg.w2e,
+        "w3e": cfg.w3e,
+        }
 
         self.cfg    = cfg
         self.filter = None
@@ -25,6 +153,7 @@ class VernierRespRecorder:
         # ── Raw data ──────────────────────────────────────────────────────────
         self.samples    = []
         self.timestamps = []
+        self.t0         = None
 
         # ── Processed signal ──────────────────────────────────────────────────
         self.samples_processed = []
@@ -95,7 +224,12 @@ class VernierRespRecorder:
                             continue
 
                         val = float(s.value)
-                        ts  = time.time()
+                        ts_abs = time.time()
+
+                        if self.t0 is None:
+                            self.t0 = ts_abs
+
+                        ts = ts_abs - self.t0
 
                         # ── Filter init ───────────────────────────────────────
                         if self.filter is None:
@@ -127,7 +261,7 @@ class VernierRespRecorder:
                         self.timestamps.append(ts)
                         self.samples_processed.append(processed_val)
 
-                        t_rel = ts - self.timestamps[0]
+                        t_rel = ts
 
                         # ── Analysis ──────────────────────────────────────────
                         if self.initial_calibration_done:
@@ -138,15 +272,21 @@ class VernierRespRecorder:
                                 and t_rel >= self.cfg.initial_calibration_delay_s):
                             calib = calibration.initial_calibration(self.samples_processed)
                             if calib is not None:
-                                *calib_vals, last_inh, last_exh = calib
-                                self.calibration_vals         = tuple(calib_vals)
-                                self.inh_onset                = [last_inh]
-                                self.exh_onset                = [last_exh]
-                                self.last_phase               = ("inh" if last_inh[0] > last_exh[0]
-                                                                  else "exh")
+                                *calibration_vals, last_inh, last_exh = calib
+                                self.calibration_vals = tuple(calibration_vals)
+
+                                adapt_weights_from_initial_calibration(
+                                    self.cfg,
+                                    self.calibration_vals,
+                                    base_weights=self.base_weights,
+                                    blend=0.35,
+                                )
+                                self.inh_onset = [last_inh]
+                                self.exh_onset = [last_exh]
+                                self.last_phase = "inh" if last_inh[0] > last_exh[0] else "exh"
                                 self.initial_calibration_done = True
-                                self.last_recalibration_time  = ts
-                                print(f"Initial calibration complete  t={t_rel:.1f}s")
+                                self.last_recalibration_time = ts
+                                print("Initial calibration complete")
 
                         # ── Rolling recalibration ─────────────────────────────
                         elif (self.initial_calibration_done
@@ -248,8 +388,11 @@ class VernierRespRecorder:
         last_inh_ts, last_inh_val = self.inh_onset[-1]
         last_exh_ts, last_exh_val = self.exh_onset[-1]
 
-        since_last_inh_s = inh_cand_ts - last_inh_ts
-        since_last_exh_s = exh_cand_ts - last_exh_ts
+        # current_ts is the most recent sample — use for interval timing
+        # so elapsed time isn't underestimated by the candidate's lag in the window
+        current_ts       = last_timestamps[-1]
+        since_last_inh_s = current_ts - last_inh_ts
+        since_last_exh_s = current_ts - last_exh_ts
 
         ddx_approx_i, ddx_approx_f = deriv
 
@@ -270,24 +413,32 @@ class VernierRespRecorder:
         # ── Inhalation ────────────────────────────────────────────────────────
         if is_inh_candidate and can_detect_inh:
 
-            z = abs(inh_slope - expected_slope_inh) / (spread_slope_inh + 1e-6)
-            z_score_slope_inh = np.exp(-0.5 * z**2)
+            # log-normal slope: slopes are positive and right-skewed
+            # calibration stores log-space median and spread
+            if inh_slope > 0:
+                z = (np.log(inh_slope) - expected_slope_inh) / (spread_slope_inh + 1e-6)
+                z_score_slope_inh = np.exp(-0.5 * z**2)
+            else:
+                z_score_slope_inh = 0.0
 
-            z = abs(since_last_inh_s - expected_inh) / (spread_inh + 1e-6)
-            z_score_inh = np.exp(-0.5 * z**2)
+            # one-sided interval: being early is implausible, being late is normal
+            _z_inh = (since_last_inh_s - expected_inh) / (spread_inh + 1e-6)
+            z_score_inh = np.exp(-0.5 * (_z_inh / (1.0 if since_last_inh_s < expected_inh else 2.5))**2)
 
-            z = abs((inh_cand_ts - last_exh_ts) - expected_exh_to_inh) / (spread_exh_to_inh + 1e-6)
-            z_score_inh_cross = np.exp(-0.5 * z**2)
+            # one-sided cross-interval: same asymmetric logic
+            _gap_e2i = inh_cand_ts - last_exh_ts
+            _z_e2i   = (_gap_e2i - expected_exh_to_inh) / (spread_exh_to_inh + 1e-6)
+            z_score_inh_cross = np.exp(-0.5 * (_z_e2i / (1.0 if _gap_e2i < expected_exh_to_inh else 3.0))**2)
 
-            prominence_inh = last_exh_val - inh_cand_val
+            # prominence: depth below last exh peak — clamped to zero to avoid
+            # belt drift creating negative prominences that score symmetrically
+            prominence_inh = max(0.0, last_exh_val - inh_cand_val)
             z = abs(prominence_inh - expected_prom_inh) / (spread_prom_inh + 1e-6)
             z_score_prom_inh = np.exp(-0.5 * z**2)
 
             timing_inh = (z_score_inh * z_score_inh_cross) ** 0.5
 
-            if (z_score_slope_inh >= self.cfg.floor_slope_inh
-                    and timing_inh >= self.cfg.floor_timing_inh):
-
+            if z_score_slope_inh >= self.cfg.floor_slope_inh:
                 inh_candidacy_score = (
                     self.cfg.w1i * z_score_slope_inh +
                     self.cfg.w2i * timing_inh +
@@ -302,24 +453,30 @@ class VernierRespRecorder:
         # ── Exhalation ────────────────────────────────────────────────────────
         if is_exh_candidate and can_detect_exh:
 
-            z = abs(exh_slope - expected_slope_exh) / (spread_slope_exh + 1e-6)
-            z_score_slope_exh = np.exp(-0.5 * z**2)
+            # log-normal slope
+            if exh_slope > 0:
+                z = (np.log(exh_slope) - expected_slope_exh) / (spread_slope_exh + 1e-6)
+                z_score_slope_exh = np.exp(-0.5 * z**2)
+            else:
+                z_score_slope_exh = 0.0
 
-            z = abs(since_last_exh_s - expected_exh) / (spread_exh + 1e-6)
-            z_score_exh = np.exp(-0.5 * z**2)
+            # one-sided interval
+            _z_exh = (since_last_exh_s - expected_exh) / (spread_exh + 1e-6)
+            z_score_exh = np.exp(-0.5 * (_z_exh / (1.0 if since_last_exh_s < expected_exh else 2.5))**2)
 
-            z = abs((exh_cand_ts - last_inh_ts) - expected_inh_to_exh) / (spread_inh_to_exh + 1e-6)
-            z_score_exh_cross = np.exp(-0.5 * z**2)
+            # one-sided cross-interval
+            _gap_i2e = exh_cand_ts - last_inh_ts
+            _z_i2e   = (_gap_i2e - expected_inh_to_exh) / (spread_inh_to_exh + 1e-6)
+            z_score_exh_cross = np.exp(-0.5 * (_z_i2e / (1.0 if _gap_i2e < expected_inh_to_exh else 3.0))**2)
 
-            prominence_exh = exh_cand_val - last_inh_val
+            # prominence: height above last inh trough — clamped
+            prominence_exh = max(0.0, exh_cand_val - last_inh_val)
             z = abs(prominence_exh - expected_prom_exh) / (spread_prom_exh + 1e-6)
             z_score_prom_exh = np.exp(-0.5 * z**2)
 
             timing_exh = (z_score_exh * z_score_exh_cross) ** 0.5
 
-            if (z_score_slope_exh >= self.cfg.floor_slope_exh
-                    and timing_exh >= self.cfg.floor_timing_exh):
-
+            if z_score_slope_exh >= self.cfg.floor_slope_exh:
                 exh_candidacy_score = (
                     self.cfg.w1e * z_score_slope_exh +
                     self.cfg.w2e * timing_exh +

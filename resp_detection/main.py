@@ -1,7 +1,7 @@
 import argparse
 import tkinter as tk
 
-from respiration_detection import VernierRespRecorder
+from resp_record import VernierRespRecorder
 from ui import LiveTraceUI
 from config import Config
 

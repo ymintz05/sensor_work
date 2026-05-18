@@ -179,8 +179,13 @@ def _compute_calibration(raw_stream):
     if len(slopes_inh) < 2 or len(slopes_exh) < 2:
         return None
 
-    exp_slope_inh = np.median(slopes_inh);  spr_slope_inh = _spread(slopes_inh)
-    exp_slope_exh = np.median(slopes_exh);  spr_slope_exh = _spread(slopes_exh)
+    # log-space stats — slopes are positive and right-skewed
+    log_slopes_inh = np.log(slopes_inh[slopes_inh > 0])
+    log_slopes_exh = np.log(slopes_exh[slopes_exh > 0])
+    if len(log_slopes_inh) < 2 or len(log_slopes_exh) < 2:
+        return None
+    exp_slope_inh = np.median(log_slopes_inh);  spr_slope_inh = _spread(log_slopes_inh)
+    exp_slope_exh = np.median(log_slopes_exh);  spr_slope_exh = _spread(log_slopes_exh)
 
     # ── Prominence stats ──────────────────────────────────────────────────────
     inh_prom, exh_prom = _prominence_values(sig, trough_idx, peak_idx)

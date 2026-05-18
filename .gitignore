@@ -1,0 +1,16 @@
+# Ignore everything by default
+*
+
+# But keep gitignore itself
+!.gitignore
+
+# Allow entering the resp_detection folder
+!resp_detection/
+
+# Keep only these source files
+!resp_detection/calibration.py
+!resp_detection/config.py
+!resp_detection/main.py
+!resp_detection/resp_record.py
+!resp_detection/signal_processing.py
+!resp_detection/ui.py
